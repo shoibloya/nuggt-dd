@@ -245,7 +245,7 @@ REFERENCE DOCUMENT (from the user upload):
     # Submit background job
     try:
         job = client.responses.create(
-            model="o3-deep-research",
+            model="o4-mini-deep-research",
             input=prompt,
             background=True,
             tools=tools,
