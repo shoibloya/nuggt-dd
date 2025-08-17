@@ -1,6 +1,8 @@
 import os
 import time
 import json
+import re
+import unicodedata
 import streamlit as st
 from openai import OpenAI
 
@@ -10,7 +12,7 @@ from openai import OpenAI
 from llama_cloud_services import LlamaParse, EU_BASE_URL
 
 st.set_page_config(page_title="PDF → Markdown (LlamaParse Agentic Plus)", layout="wide")
-st.title("PDF → Markdown (Agentic Plus)")
+st.title("EMBA Due Diligence Checklist Generator")
 
 # --- Secrets / config ---
 API_KEY = st.secrets.get("LLAMA_CLOUD_API_KEY") or os.getenv("LLAMA_CLOUD_API_KEY")
@@ -62,12 +64,7 @@ for i, page in enumerate(result.pages, start=1):
 full_markdown = "".join(parts).strip()
 
 st.success(f"Parsed **{len(result.pages)}** page(s) from **{uploaded.name}**")
-st.download_button(
-    "Download Markdown",
-    data=full_markdown.encode("utf-8"),
-    file_name=f"{os.path.splitext(uploaded.name)[0]}.md",
-    mime="text/markdown",
-)
+
 
 #st.divider()
 #st.subheader("Extracted Markdown")
@@ -131,6 +128,88 @@ NUS BUSINESS SCHOOL
 © Professor Virginia Cha and Jeremy Goh 2022. All Rights Reserved.
 """
 
+# -----------------------------
+# Robust text & URL sanitizers
+# -----------------------------
+# characters to treat as zero-width/bidi controls
+_ZERO_WIDTH_BIDI = r"\u200B\u200C\u200D\u2060\ufeff\u200E\u200F\u061C\u202A-\u202E\u2066-\u2069"
+_ZERO_WIDTH_BIDI_CLASS = f"[{_ZERO_WIDTH_BIDI}]"
+
+# exotic spaces that should become a normal space
+_UNICODE_SPACES = [
+    "\u00A0", "\u1680", "\u180E", "\u2000", "\u2001", "\u2002", "\u2003", "\u2004",
+    "\u2005", "\u2006", "\u2007", "\u2008", "\u2009", "\u200A", "\u202F", "\u205F",
+    "\u3000"
+]
+
+# map fancy dashes to ASCII hyphen (for URLs only)
+_DASHES_FOR_URL = dict.fromkeys(map(ord, "–—‒−-"), "-")  # includes non-breaking hyphen
+
+def _normalize_unicode_text(s: str) -> str:
+    """Flatten fancy Unicode, preserve word boundaries, normalize spaces, fix dash spacing."""
+    if not s:
+        return s
+    s = unicodedata.normalize("NFKC", s)
+
+    # normalize exotic spaces to regular spaces
+    for sp in _UNICODE_SPACES:
+        s = s.replace(sp, " ")
+
+    # if zero-width/bidi controls appear *between* word chars, turn them into a real space
+    s = re.sub(rf"(?<=\w){_ZERO_WIDTH_BIDI_CLASS}+(?=\w)", " ", s)
+
+    # remove remaining zero-width/bidi controls elsewhere
+    s = re.sub(_ZERO_WIDTH_BIDI_CLASS, "", s)
+
+    # remove soft hyphen (used for hyphenation in copy/paste)
+    s = s.replace("\u00AD", "")
+
+    # ensure spaces around em/en/ASCII hyphen when used between word-ish tokens
+    s = re.sub(r"(?<=[\w\)\]])([–—-])(?=[\w\(\[])", r" \1 ", s)
+
+    # collapse repeated spaces and tidy spaces before punctuation
+    s = re.sub(r"[ \t]{2,}", " ", s)
+    s = re.sub(r" +([,.;:!?])", r"\1", s)
+
+    return s
+
+def _clean_url(url: str) -> str:
+    """Canonicalize URL: remove text-fragment, strip whitespace, normalize dashes, trim trailing punctuation."""
+    if not url:
+        return url
+    u = unicodedata.normalize("NFKC", url)
+    # remove Chrome text fragments (allow random spaces)
+    u = re.sub(r"#\s*:\s*~\s*:\s*text\s*=.*$", "", u, flags=re.IGNORECASE)
+    # drop all whitespace characters and soft hyphens
+    u = re.sub(r"\s+", "", u).replace("\u00AD", "")
+    # normalize dash variants
+    u = u.translate(_DASHES_FOR_URL)
+    # strip trailing punctuation accidentally captured
+    u = re.sub(r"[),.;:!?]+$", "", u)
+    return u
+
+def _sanitize_md_links(md: str) -> str:
+    """Rewrite [label](url) with cleaned url."""
+    def repl(m):
+        label, url = m.group(1), m.group(2)
+        return f"[{label}]({_clean_url(url)})"
+    return re.sub(r"\[([^\]]+)\]\(([^)]+)\)", repl, md)
+
+def _sanitize_bare_urls(md: str) -> str:
+    """Clean bare URLs not inside markdown links."""
+    def repl(m):
+        return _clean_url(m.group(0))
+    return re.sub(r"https?://[^\s)\]\}>]+", repl, md)
+
+def _final_sanitize(md_text: str) -> str:
+    """Full pipeline for model output before rendering."""
+    t = _normalize_unicode_text(md_text)
+    t = _sanitize_md_links(t)
+    t = _sanitize_bare_urls(t)
+    return t
+
+# -----------------------------
+
 # Single action button
 if st.button("Create Due Diligence Report", type="primary"):
     # Prompt updated per request (no slides/bullets mention; no repetition; formulas rendered as code/plain text)
@@ -141,7 +220,8 @@ TASK:
 1) Conduct deep research using axuthoritative, up-to-date sources. Gather facts, numbers, trends, regulations, competitors, market sizing, unit economics, execution feasibility factors, and key risks.
 2) Produce a due diligence checklist report that fills the template EXACTLY as provided below. Do not change headings, punctuation, symbols, or section order. Keep the literal text that is part of the template; add your researched content as detailed content under each listed line.
 3) Do NOT repeat information between sections. Each section must provide new, non-duplicative insights (you may cross-reference without copying text).
-4) Do NOT use LaTeX. Render any formulas or expressions as plain text or Markdown code (e.g., `ROI = (Gain - Cost) / Cost`). 
+4) Do NOT add any formulas or colors. Reply in only markdown and nothing else.
+5) ONLY REPLY IN MARKDOWN, NO COLORS, NO HTML
 
 OUTPUT:
 - Return only the completed template in Markdown. Do not add extra sections or commentary before or after.
@@ -165,7 +245,7 @@ REFERENCE DOCUMENT (from the user upload):
     # Submit background job
     try:
         job = client.responses.create(
-            model="o4-mini-deep-research",
+            model="o3-deep-research",
             input=prompt,
             background=True,
             tools=tools,
@@ -199,13 +279,11 @@ REFERENCE DOCUMENT (from the user upload):
         try:
             job = fetch_job(job_id)
         except Exception:
-            # keep showing progress only
             continue
 
         status = getattr(job, "status", "unknown")
 
         if status in ("queued", "in_progress", "unknown"):
-            # 2× slower progression: prior heuristic ~10 + elapsed//2; now 10 + elapsed//4
             elapsed = int(time.time() - started)
             pct = min(95, max(pct, 10 + (elapsed // 4)))
             prog.progress(pct)
@@ -225,7 +303,6 @@ REFERENCE DOCUMENT (from the user upload):
                 pass
             st.stop()
         else:
-            # keep progress minimal
             pct = min(98, pct + 1)
             prog.progress(pct)
             pct_text.markdown(f"**{pct}%**")
@@ -250,14 +327,11 @@ REFERENCE DOCUMENT (from the user upload):
         st.error("No text returned from Deep Research.")
         st.stop()
 
+    # --- Normalize weird Unicode & sanitize links/URLs before rendering ---
+    sanitized_output = _final_sanitize(output_text)
+
     st.divider()
     st.subheader("Due Diligence Checklist (Completed)")
-    st.markdown(output_text, unsafe_allow_html=False)
+    st.markdown(sanitized_output, unsafe_allow_html=False)
 
-    st.download_button(
-        "Download Due Diligence Checklist",
-        data=output_text.encode("utf-8"),
-        file_name=f"{os.path.splitext(uploaded.name)[0]}_due_diligence_checklist.md",
-        mime="text/markdown",
-    )
-
+    # (Removed the final download button as requested)
