@@ -38,19 +38,28 @@ if not uploaded:
 file_bytes = uploaded.read()
 extra_info = {"file_name": uploaded.name}
 
-# Agentic Plus = document-wide agent mode
-# --- CHANGE: default to NA; on failure, fall back to EU before erroring ---
-NA_BASE_URL = "api.cloud.llamaindex.ai"
+# --- normalize any scheme from base_url and add NA→EU fallback (only change) ---
+def _normalize_base_host(v):
+    if not v:
+        return None
+    v = v.strip()
+    v = re.sub(r'^https?://', '', v, flags=re.IGNORECASE)
+    return v.rstrip('/')
+
+base_url = _normalize_base_host(base_url)
+
+NA_BASE_HOST = "api.cloud.llamaindex.ai"
+EU_BASE_HOST = _normalize_base_host(EU_BASE_URL) if EU_BASE_URL else "api.cloud.eu.llamaindex.ai"
 
 candidates = []
 if base_url:
     candidates.append(base_url)
-    if base_url == EU_BASE_URL or base_url.strip().lower() == "api.cloud.eu.llamaindex.ai":
-        candidates.append(NA_BASE_URL)
+    if base_url.lower() in ("eu", EU_BASE_HOST):
+        candidates.append(NA_BASE_HOST)
     else:
-        candidates.append(EU_BASE_URL)
+        candidates.append(EU_BASE_HOST)
 else:
-    candidates = [NA_BASE_URL, EU_BASE_URL]
+    candidates = [NA_BASE_HOST, EU_BASE_HOST]
 
 lp_kwargs_common = dict(
     api_key=API_KEY,
@@ -67,8 +76,7 @@ last_err = None
 for bu in candidates:
     try:
         lp_kwargs = dict(lp_kwargs_common)
-        if bu:
-            lp_kwargs["base_url"] = bu
+        lp_kwargs["base_url"] = bu
         parser = LlamaParse(**lp_kwargs)
 
         st.info("Parsing with Agentic Plus… (document-wide agent for complex layouts)")
