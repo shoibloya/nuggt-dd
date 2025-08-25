@@ -39,9 +39,21 @@ file_bytes = uploaded.read()
 extra_info = {"file_name": uploaded.name}
 
 # Agentic Plus = document-wide agent mode
-parser = LlamaParse(
+# --- CHANGE: default to NA; on failure, fall back to EU before erroring ---
+NA_BASE_URL = "api.cloud.llamaindex.ai"
+
+candidates = []
+if base_url:
+    candidates.append(base_url)
+    if base_url == EU_BASE_URL or base_url.strip().lower() == "api.cloud.eu.llamaindex.ai":
+        candidates.append(NA_BASE_URL)
+    else:
+        candidates.append(EU_BASE_URL)
+else:
+    candidates = [NA_BASE_URL, EU_BASE_URL]
+
+lp_kwargs_common = dict(
     api_key=API_KEY,
-    base_url=base_url,
     parse_mode="parse_document_with_agent",  # Agentic Plus / highest-fidelity
     result_type="markdown",                  # return Markdown
     output_tables_as_HTML=use_html_tables,
@@ -50,9 +62,26 @@ parser = LlamaParse(
     verbose=False,
 )
 
-st.info("Parsing with Agentic Plus… (document-wide agent for complex layouts)")
-with st.spinner("Contacting LlamaParse…"):
-    result = parser.parse(file_bytes, extra_info=extra_info)
+result = None
+last_err = None
+for bu in candidates:
+    try:
+        lp_kwargs = dict(lp_kwargs_common)
+        if bu:
+            lp_kwargs["base_url"] = bu
+        parser = LlamaParse(**lp_kwargs)
+
+        st.info("Parsing with Agentic Plus… (document-wide agent for complex layouts)")
+        with st.spinner("Contacting LlamaParse…"):
+            result = parser.parse(file_bytes, extra_info=extra_info)
+        break
+    except Exception as e:
+        last_err = e
+        continue
+
+if result is None:
+    st.error(f"Failed to parse with NA and EU endpoints. Last error: {last_err}")
+    st.stop()
 
 # Combine page-level markdown (the API still returns pages even in doc mode)
 parts = []
